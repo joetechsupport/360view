@@ -87,6 +87,7 @@ class StitchRequest(BaseModel):
 class StitchResponse(BaseModel):
     success: bool
     isTrue360: bool
+    isPreviewReady: bool = False
     engine: str = "opencv"
     roomId: str = ""
     panoramaBase64: Optional[str] = None
@@ -113,7 +114,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="OMMA Stitch Service",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan
 )
 
@@ -377,7 +378,7 @@ def stitch_images(images: list[np.ndarray]) -> tuple[bool, np.ndarray | None, li
 
 @app.get("/")
 async def root():
-    return {"service": "omma-stitch-service", "version": "1.1.0"}
+    return {"service": "omma-stitch-service", "version": "1.2.0"}
 
 @app.get("/health")
 async def health():
@@ -385,7 +386,7 @@ async def health():
         "ok": True,
         "service": "omma-stitch-service",
         "engine": "opencv",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "opencv_version": cv2.__version__,
         "max_images": MAX_IMAGES,
         "memory_optimized": True,
@@ -509,29 +510,42 @@ async def stitch(request: StitchRequest):
     aspect_ratio = result_w / result_h if result_h > 0 else 0
     is_equirectangular = 1.5 <= aspect_ratio <= 2.5
 
+    # v1.2.0 construction mode:
+    # Completed construction jobs often use existing project photos that cannot be re-shot.
+    # A non-2:1 stitched output can still be a useful standard panorama preview.
     if not is_equirectangular:
         warnings.append(
-            f"Output aspect ratio {aspect_ratio:.2f} outside equirectangular range (1.5–2.5)."
+            f"Standard panorama generated: aspect ratio {aspect_ratio:.2f} is not full 2:1 equirectangular."
         )
 
+    min_dimensions_ok = result_w >= 800 and result_h >= 400
+    is_preview_ready = (
+        confidence >= 0.40 and
+        len(request.images) >= 5 and
+        min_dimensions_ok
+    )
+
     is_true_360 = (
-        confidence >= 0.7 and
-        result_w >= 800 and    # Lowered from 1024 since we downsample inputs
-        result_h >= 400 and    # Lowered from 512
+        confidence >= 0.70 and
+        min_dimensions_ok and
         is_equirectangular
     )
 
-    if not is_true_360:
+    if not is_preview_ready:
         reasons = []
-        if confidence < 0.7:
-            reasons.append(f"confidence {confidence} < 0.7")
+        if confidence < 0.40:
+            reasons.append(f"confidence {confidence} < 0.40")
+        if len(request.images) < 5:
+            reasons.append(f"source images {len(request.images)} < 5")
         if result_w < 800:
             reasons.append(f"width {result_w} < 800")
         if result_h < 400:
             reasons.append(f"height {result_h} < 400")
-        if not is_equirectangular:
-            reasons.append(f"aspect ratio {aspect_ratio:.2f} not equirectangular")
-        warnings.append(f"Not marked as true 360: {', '.join(reasons)}")
+        warnings.append(f"Not preview ready: {', '.join(reasons)}")
+    elif not is_true_360:
+        warnings.append(
+            "Preview ready, but not marked true 360 because confidence is below 0.70 or output is not equirectangular."
+        )
 
     # ─── Encode Output ───
 
@@ -563,12 +577,13 @@ async def stitch(request: StitchRequest):
 
     elapsed_ms = int((time.time() - start_time) * 1000)
     logger.info(f"{'='*60}")
-    logger.info(f"DONE: {result_w}x{result_h}, confidence={confidence}, true360={is_true_360}, {elapsed_ms}ms")
+    logger.info(f"DONE: {result_w}x{result_h}, confidence={confidence}, true360={is_true_360}, previewReady={is_preview_ready}, {elapsed_ms}ms")
     logger.info(f"{'='*60}")
 
     return StitchResponse(
         success=True,
         isTrue360=is_true_360,
+        isPreviewReady=is_preview_ready,
         engine="opencv",
         roomId=room_id,
         panoramaBase64=panorama_b64,
