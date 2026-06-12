@@ -1,209 +1,193 @@
-# OMMA Stitch Service
+# OMMA Stitch Service — OpenCV Backend
 
-OpenCV panorama stitching backend for **OMMA 360 Builder**.
+Production stitching backend for the OMMA 360 Builder.  
+**Memory-optimized for Render starter tier (512 MB).**
 
----
+## Memory Strategy
 
-## Endpoints
+The root cause of OOM crashes: holding full-resolution images in RAM.
 
-| Method | Path         | Auth required | Description                    |
-|--------|--------------|---------------|--------------------------------|
-| GET    | /health      | No            | Health check                   |
-| GET    | /api/health  | No            | Health check (alias)           |
-| POST   | /api/stitch  | If key set    | Stitch images into a panorama  |
+**Fix:** Every image is downsampled *during decode*, before a full-resolution NumPy array ever exists.
 
----
+```
+base64 string → raw bytes → PIL (lazy) → EXIF fix → resize in PIL → small OpenCV array
+```
 
-## Quick Start (local)
+The max dimension scales based on image count:
+
+| Images | Max Dimension | ~RAM per image | 12 images total |
+|--------|--------------|----------------|-----------------|
+| ≤ 8    | 1600px       | ~5.5 MB        | ~66 MB          |
+| 9–15   | 1200px       | ~4 MB          | ~48 MB          |
+| > 15   | 800px        | ~2 MB          | ~40 MB          |
+
+OpenCV Stitcher internally uses ~2-3× the source memory, so peak usage stays under ~300 MB — safely within the 512 MB container limit.
+
+## Quick Start (Local)
 
 ```bash
-# 1. Create a virtual environment
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-
-# 2. Install dependencies
+cd stitch-service
 pip install -r requirements.txt
-
-# 3. Run
 python main.py
-# Service is now at http://localhost:8000
 ```
 
-Test the health endpoint:
+Service runs at `http://localhost:8000`.
+
+## Quick Start (Docker)
 
 ```bash
-curl http://localhost:8000/health
+cd stitch-service
+docker build -t omma-stitch .
+docker run -p 8000:8000 omma-stitch
 ```
 
-Expected response:
+## Deploy to Render
+
+1. Push this `stitch-service/` directory to a GitHub repo
+2. Create a new **Web Service** on Render
+3. Point it to the repo — Render auto-detects the Dockerfile
+4. Optionally set `OMMA_API_KEY` in the Render dashboard
+5. After deploy, your endpoint is: `https://your-service.onrender.com/api/stitch`
+
+## Connect to OMMA
+
+1. Open OMMA 360 Builder
+2. Go to **Settings** tab
+3. Select **opencv** engine
+4. Enter endpoint URL: `https://your-service.onrender.com/api/stitch`
+5. Enter API key if configured
+6. Click **Test Connection** — should show ✓ Connected
+7. Go to any room with 2+ uploaded images
+8. Click **Build 360 Room**
+
+## API Reference
+
+### GET /health  &  GET /api/health
 
 ```json
 {
   "ok": true,
   "service": "omma-stitch-service",
   "engine": "opencv",
-  "version": "1.0.0",
-  "opencvVersion": "4.9.0",
-  "maxImages": 40,
-  "maxImageDimension": 3000,
-  "confidenceThreshold": 0.70,
-  "auth": false
+  "version": "1.1.0",
+  "opencv_version": "4.9.0",
+  "max_images": 30,
+  "memory_optimized": true,
+  "max_dimension_few": 1600,
+  "max_dimension_medium": 1200,
+  "max_dimension_many": 800,
+  "auth_required": false
 }
 ```
 
----
+### POST /api/stitch
 
-## Deploy to Render
-
-1. Push this folder to a GitHub repository.
-2. Go to [render.com](https://render.com) → **New Web Service**.
-3. Connect your repo.
-4. Render auto-detects `render.yaml` — click **Apply**.
-5. Optionally set `OMMA_API_KEY` in the Render dashboard.
-6. Wait for the build to complete (first build takes 3–5 minutes).
-7. Copy the service URL.
-
----
-
-## Configure OMMA Frontend
-
-1. Open OMMA 360 Builder → **Settings** tab.
-2. Select engine: **opencv**.
-3. Set stitch endpoint: `https://your-service.onrender.com/api/stitch`
-4. Optionally set API key if `OMMA_API_KEY` is configured.
-5. Click **Test Connection** → should show ✓ Connected.
-
----
-
-## POST /api/stitch
-
-### Request
-
+**Request:**
 ```json
 {
-  "roomId": "room_abc123",
+  "roomId": "kitchen_001",
   "roomName": "Kitchen",
-  "imageCount": 6,
   "images": [
     {
       "index": 0,
-      "filename": "image-001.jpg",
-      "data": "BASE64_ENCODED_JPEG",
+      "filename": "IMG_001.jpg",
+      "data": "BASE64_STRING",
       "mimeType": "image/jpeg"
     }
   ],
   "options": {
     "outputFormat": "jpeg",
-    "outputQuality": 0.92,
+    "outputQuality": 0.85,
     "targetProjection": "equirectangular"
   }
 }
 ```
 
-### Success Response
-
+**Success:**
 ```json
 {
   "success": true,
   "isTrue360": true,
   "engine": "opencv",
-  "roomId": "room_abc123",
-  "panoramaBase64": "BASE64_JPEG",
-  "thumbnailBase64": "BASE64_JPEG",
-  "width": 4096,
-  "height": 2048,
-  "aspectRatio": 2.0,
-  "confidence": 0.94,
-  "qualityGates": {
-    "minDimensions": true,
-    "aspectRatio": true,
-    "borderArtifacts": true,
-    "edgeDensity": true
-  },
+  "roomId": "kitchen_001",
+  "panoramaBase64": "...",
+  "thumbnailBase64": "...",
+  "width": 3200,
+  "height": 1600,
+  "confidence": 0.91,
   "warnings": [],
-  "processingTimeMs": 4821
+  "processingTimeMs": 4200
 }
 ```
 
-### Failure Response
-
+**Failure:**
 ```json
 {
   "success": false,
   "isTrue360": false,
   "engine": "opencv",
-  "roomId": "room_abc123",
-  "error": "Not enough overlapping features — add more images.",
+  "roomId": "kitchen_001",
+  "error": "Unable to create stable panorama. Images may lack sufficient overlap or feature points.",
   "warnings": [],
-  "processingTimeMs": 1203
+  "processingTimeMs": 1500
 }
 ```
 
----
-
-## Quality Gates
-
-A room only receives `isTrue360: true` when ALL of the following pass:
-
-| Gate              | Condition                                         |
-|-------------------|---------------------------------------------------|
-| `minDimensions`   | Output is at least 1024 × 256 px                  |
-| `aspectRatio`     | Width / Height is between 1.5 and 3.0             |
-| `borderArtifacts` | Black pixel fraction < 20 %                       |
-| `edgeDensity`     | Edge pixel fraction > 1 % (image not blank)       |
-| `confidence`      | Composite score ≥ threshold (default 0.70)        |
-
-If any gate fails the room is returned with `isTrue360: false` and a
-detailed `warnings` list explaining which gate failed.
-
----
-
 ## Environment Variables
 
-| Variable              | Default | Description                                      |
-|-----------------------|---------|--------------------------------------------------|
-| `PORT`                | `8000`  | HTTP port                                        |
-| `OMMA_API_KEY`        | `""`    | If set, require `Authorization: Bearer <key>`   |
-| `CORS_ORIGINS`        | `"*"`   | Comma-separated allowed origins                  |
-| `MAX_IMAGE_DIMENSION` | `3000`  | Resize any axis exceeding this value             |
-| `MAX_IMAGES`          | `40`    | Hard cap on images per request                   |
-| `CONFIDENCE_THRESHOLD`| `0.70`  | Minimum composite score to set `isTrue360: true` |
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | 8000 | Server port |
+| `MAX_IMAGES` | 30 | Max images per request |
+| `MAX_PAYLOAD_MB` | 100 | Max request body size |
+| `JPEG_QUALITY` | 85 | Max output JPEG quality |
+| `THUMBNAIL_WIDTH` | 480 | Thumbnail width in px |
+| `OMMA_API_KEY` | "" | If set, requires Bearer token |
 
----
+## Memory-related configs (hardcoded, tunable in code)
 
-## Tips for Good Stitching Results
+| Constant | Value | Description |
+|---|---|---|
+| `MAX_DIM_FEW` | 1600 | Max px when ≤ 8 images |
+| `MAX_DIM_MEDIUM` | 1200 | Max px when 9–15 images |
+| `MAX_DIM_MANY` | 800 | Max px when > 15 images |
 
-- Shoot **overlapping** photos — aim for 30–50 % overlap between adjacent frames.
-- Keep the camera at a **fixed position** and rotate horizontally.
-- Avoid subjects in motion between shots.
-- Use consistent exposure settings — auto exposure can cause seam lines.
-- 6–12 images per room is a good starting point for a full 360.
-- Shoot at the same height for every frame in a room.
+## Verify Deployment
 
----
-
-## Architecture
-
-```
-OMMA 360 Builder (frontend)
-  ↓  POST /api/stitch (base64 images)
-OMMA Stitch Service (this repo)
-  ↓  cv2.Stitcher.stitch()
-OpenCV panorama stitching
-  ↓  quality gates
-  ↓  encode JPEG
-  ↑  panoramaBase64 + confidence
-OMMA 360 Builder (frontend)
-  ↓  isTrue360 = true → status = complete
-  ↓  isTrue360 = false → status = needs_review
-360 Viewer / Export
+```bash
+curl https://your-service.onrender.com/health
+curl https://your-service.onrender.com/api/health
 ```
 
-OMMA = Builder + Stitcher + Exporter  
-Shared contract = ZIP package + tour.json schema
+Both should return `{"ok": true, ...}`.
 
----
+## End-to-End Flow
 
-## License
-
-MIT — OMMA 360 Builder internal service.
+```
+OMMA Frontend (browser)
+  │
+  ├── User uploads images to a room
+  ├── User selects "opencv" engine
+  ├── User enters service URL + tests connection
+  ├── User clicks "Build 360 Room"
+  │
+  ├── POST /api/stitch ──────────► OMMA Stitch Service
+  │    • base64 images                │
+  │                                   ├── Decode each image
+  │                                   ├── IMMEDIATELY downsample (≤1600px)
+  │                                   ├── Free original bytes
+  │                                   ├── Fix EXIF orientation
+  │                                   ├── Run OpenCV Stitcher
+  │                                   ├── Quality gates
+  │                                   ├── Encode JPEG + thumbnail
+  │                                   ├── Free all arrays
+  │                                   │
+  │   ◄── JSON response ─────────────┘
+  │    • panoramaBase64 + thumbnailBase64
+  │    • confidence, dimensions
+  │    • isTrue360 = true/false
+  │
+  ├── Display in 360 viewer if isTrue360
+  ├── Show diagnostic warning if not
+  └── Export when ready
+```
