@@ -2,19 +2,16 @@ services:
   - type: web
     name: omma-stitch-service
     runtime: docker
-    dockerfilePath: ./Dockerfile
-    plan: standard          # OpenCV needs ~512 MB RAM; standard = 2 GB
+    plan: starter
     healthCheckPath: /health
     envVars:
       - key: PORT
-        value: "8000"
-      - key: OMMA_API_KEY
-        sync: false         # Set this in the Render dashboard — leave blank to disable auth
-      - key: CORS_ORIGINS
-        value: "*"          # Restrict to your OMMA domain in production
-      - key: MAX_IMAGE_DIMENSION
-        value: "3000"
+        value: 8000
       - key: MAX_IMAGES
-        value: "40"
-      - key: CONFIDENCE_THRESHOLD
-        value: "0.70"
+        value: 30
+      - key: MAX_PAYLOAD_MB
+        value: 100
+      - key: JPEG_QUALITY
+        value: 85
+      - key: OMMA_API_KEY
+        value: ""
