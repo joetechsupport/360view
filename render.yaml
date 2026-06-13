@@ -8,9 +8,9 @@ services:
       - key: PORT
         value: 8000
       - key: MAX_IMAGES
-        value: 50
+        value: 30
       - key: MAX_PAYLOAD_MB
-        value: 200
+        value: 100
       - key: JPEG_QUALITY
         value: 85
       - key: OMMA_API_KEY
